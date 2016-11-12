@@ -1,0 +1,192 @@
+--- hid-logitech-hidpp.c.bak	2016-11-12 13:00:36.649844238 +0800
++++ hid-logitech-hidpp.c	2016-11-12 13:08:08.065101862 +0800
+@@ -56,8 +56,9 @@ MODULE_PARM_DESC(disable_tap_to_click,
+ #define HIDPP_QUIRK_CLASS_M560			BIT(1)
+ #define HIDPP_QUIRK_CLASS_K400			BIT(2)
+ #define HIDPP_QUIRK_CLASS_G920			BIT(3)
++#define HIDPP_QUIRK_CLASS_M545			BIT(4)
+ 
+-/* bits 2..20 are reserved for classes */
++/* bits 4..20 are reserved for classes */
+ #define HIDPP_QUIRK_CONNECT_EVENTS		BIT(21)
+ #define HIDPP_QUIRK_WTP_PHYSICAL_BUTTONS	BIT(22)
+ #define HIDPP_QUIRK_NO_HIDINPUT			BIT(23)
+@@ -1816,6 +1817,128 @@ static int m560_input_mapping(struct hid
+ }
+ 
+ /* ------------------------------------------------------------------------- */
++/* Logitech M545/M546 devices                                                */
++/* ------------------------------------------------------------------------- */
++
++/*
++ * Logitech M545 protocol overview
++ *
++ * The Logitech M545 mouse, is designed for windows 8. When the sides buttons
++ * are pressed, it sends some keyboard keys events instead of buttons ones.
++ *
++ * forward button -> Super_R
++ * backward button -> Super_L+'d' (press only)
++ * NB: press-only means that when the button is pressed, the
++ * KeyPress/ButtonPress and KeyRelease/ButtonRelease events are generated
++ * together sequentially; instead when the button is released, no event is
++ * generated !
++ *
++ * For the sides button it sends:
++ *	side 1 button (forward)     press   11<xx>15 0000a900...
++ *	side 2 button (backward)    press   11<xx>15 3500ae00...
++ */
++
++struct m545_private_data {
++	struct input_dev *input;
++};
++
++#define M545_SUB_ID			0x15
++
++static int m545_allocate(struct hid_device *hdev)
++{
++	struct hidpp_device *hidpp = hid_get_drvdata(hdev);
++	struct m545_private_data *d;
++
++	d = devm_kzalloc(&hdev->dev, sizeof(struct m545_private_data),
++			GFP_KERNEL);
++	if (!d)
++		return -ENOMEM;
++
++	hidpp->private_data = d;
++
++	return 0;
++};
++
++static int m545_raw_event(struct hid_device *hdev, u8 *data, int size)
++{
++	struct hidpp_device *hidpp = hid_get_drvdata(hdev);
++	struct m545_private_data *mydata = hidpp->private_data;
++
++	/* sanity check */
++	if (!mydata || !mydata->input) {
++		hid_err(hdev, "error in parameter\n");
++		return -EINVAL;
++	}
++
++	if (size < 7) {
++		hid_err(hdev, "error in report\n");
++		return 0;
++	}
++
++	if (data[0] == REPORT_ID_HIDPP_LONG &&
++	    data[2] == M545_SUB_ID && data[6] == 0x00) {
++		/*
++		 * m545 mouse report for middle, forward and backward button
++		 *
++		 * data[0] = 0x11
++		 * data[1] = device-id
++		 * data[2] = sub-id
++		 * data[5] = 0xa9 -> forward
++		 *	     0xae -> backward
++		 *	     0x00 -> release all
++		 * data[6] = 0x00
++		 */
++
++		switch (data[5]) {
++		case 0xa9:
++			input_report_key(mydata->input, BTN_FORWARD, 1);
++			break;
++		case 0xae:
++			input_report_key(mydata->input, BTN_BACK, 1);
++			break;
++		case 0x00:
++			input_report_key(mydata->input, BTN_BACK, 0);
++			input_report_key(mydata->input, BTN_FORWARD, 0);
++			break;
++		default:
++			hid_err(hdev, "error in report\n");
++			return 0;
++		}
++		input_sync(mydata->input);
++	}
++
++	return 1;
++}
++
++static void m545_populate_input(struct hidpp_device *hidpp,
++		struct input_dev *input_dev, bool origin_is_hid_core)
++{
++	struct m545_private_data *mydata = hidpp->private_data;
++
++	mydata->input = input_dev;
++
++	__set_bit(EV_KEY, mydata->input->evbit);
++	__set_bit(BTN_MIDDLE, mydata->input->keybit);
++	__set_bit(BTN_RIGHT, mydata->input->keybit);
++	__set_bit(BTN_LEFT, mydata->input->keybit);
++	__set_bit(BTN_BACK, mydata->input->keybit);
++	__set_bit(BTN_FORWARD, mydata->input->keybit);
++
++	__set_bit(EV_REL, mydata->input->evbit);
++	__set_bit(REL_X, mydata->input->relbit);
++	__set_bit(REL_Y, mydata->input->relbit);
++	__set_bit(REL_WHEEL, mydata->input->relbit);
++	__set_bit(REL_HWHEEL, mydata->input->relbit);
++}
++
++static int m545_input_mapping(struct hid_device *hdev, struct hid_input *hi,
++		struct hid_field *field, struct hid_usage *usage,
++		unsigned long **bit, int *max)
++{
++	return -1;
++}
++
++/* ------------------------------------------------------------------------- */
+ /* Logitech K400 devices                                                     */
+ /* ------------------------------------------------------------------------- */
+ 
+@@ -1925,6 +2048,9 @@ static int hidpp_input_mapping(struct hi
+ 	else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M560 &&
+ 			field->application != HID_GD_MOUSE)
+ 		return m560_input_mapping(hdev, hi, field, usage, bit, max);
++	else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M545 &&
++			field->application != HID_GD_MOUSE)
++		return m545_input_mapping(hdev, hi, field, usage, bit, max);
+ 
+ 	return 0;
+ }
+@@ -1955,6 +2081,8 @@ static void hidpp_populate_input(struct
+ 		wtp_populate_input(hidpp, input, origin_is_hid_core);
+ 	else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M560)
+ 		m560_populate_input(hidpp, input, origin_is_hid_core);
++	else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M545)
++		m545_populate_input(hidpp, input, origin_is_hid_core);
+ }
+ 
+ static int hidpp_input_configured(struct hid_device *hdev,
+@@ -2054,6 +2182,8 @@ static int hidpp_raw_event(struct hid_de
+ 		return wtp_raw_event(hdev, data, size);
+ 	else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M560)
+ 		return m560_raw_event(hdev, data, size);
++	else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M545)
++		return m545_raw_event(hdev, data, size);
+ 
+ 	return 0;
+ }
+@@ -2225,6 +2355,10 @@ static int hidpp_probe(struct hid_device
+ 		ret = m560_allocate(hdev);
+ 		if (ret)
+ 			goto allocate_fail;
++	} else if (hidpp->quirks & HIDPP_QUIRK_CLASS_M545) {
++		ret = m545_allocate(hdev);
++		if (ret)
++			goto allocate_fail;
+ 	} else if (hidpp->quirks & HIDPP_QUIRK_CLASS_K400) {
+ 		ret = k400_allocate(hdev);
+ 		if (ret)
+@@ -2354,6 +2488,10 @@ static const struct hid_device_id hidpp_
+ 	  HID_DEVICE(BUS_USB, HID_GROUP_LOGITECH_DJ_DEVICE,
+ 		USB_VENDOR_ID_LOGITECH, 0x402d),
+ 	  .driver_data = HIDPP_QUIRK_DELAYED_INIT | HIDPP_QUIRK_CLASS_M560 },
++	{ /* Mouse logitech M545/M546 */
++	  HID_DEVICE(BUS_USB, HID_GROUP_LOGITECH_DJ_DEVICE,
++		USB_VENDOR_ID_LOGITECH, 0x4028),
++	  .driver_data = HIDPP_QUIRK_CLASS_M545 },
+ 	{ /* Keyboard logitech K400 */
+ 	  HID_DEVICE(BUS_USB, HID_GROUP_LOGITECH_DJ_DEVICE,
+ 		USB_VENDOR_ID_LOGITECH, 0x4024),
