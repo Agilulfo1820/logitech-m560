@@ -6,7 +6,7 @@ don't emit the standard mouse button event, but instead a combination
 of keyboard and mouse button. This prevent a "confortable" use of
 this mouse under Linux.
 
-This driver allow to use this mouse like an ordinary mouse. The driver is
+This driver allow to use this mouse like an ordinary mouse. You can use tools(such as `xbindkeys`) to bind button to action. The driver is
 based on the source of hid-logitech-hidpp.c Linux driver.
 
 
